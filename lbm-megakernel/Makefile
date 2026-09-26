@@ -28,3 +28,26 @@ report:
 	$(PYTHON) scripts/report.py
 clean:
 	rm -rf build
+
+# Isolated Z2/DSMEM experiment: preserves the original executable and results.
+.PHONY: cluster cluster-check cluster-bench cluster-profile cluster-report cluster-all
+cluster: build/lbm-z2 build/z2-ownership build/z2-model
+build/lbm-z2: $(SOURCES) build/config.txt Makefile | build
+	$(CUDA_CXX) $(FLAGS) src/cluster_main.cu -o $@ $(LIBS)
+build/z2-ownership: $(SOURCES) build/config.txt Makefile | build
+	$(CUDA_CXX) $(FLAGS) src/cluster_ownership.cu -o $@ $(LIBS)
+cluster-check: cluster
+	$(PYTHON) experiments/z2/run.py gates
+cluster-bench: cluster
+	$(PYTHON) experiments/z2/run.py bench
+cluster-profile: cluster
+	$(PYTHON) experiments/z2/run.py profile
+cluster-report:
+	$(PYTHON) experiments/z2/report.py
+cluster-all: cluster-check
+	$(PYTHON) experiments/z2/run.py bench
+	$(PYTHON) experiments/z2/run.py profile
+	$(PYTHON) experiments/z2/report.py
+
+build/z2-model: experiments/z2/model.cpp include/layout_config.h Makefile | build
+	$(CXX) -O2 -std=c++11 $< -o $@

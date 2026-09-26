@@ -30,6 +30,19 @@ static void initialize(float *h, bool patterned, const char *obstacle) {
 
 static const Variant *selected = nullptr;
 
+#ifdef LBM_Z2_EXPERIMENT
+static cudaLaunchConfig_t cluster_config(const Variant &v,cudaLaunchAttribute &attr) {
+    cudaLaunchConfig_t config{};
+    config.gridDim=v.grid; config.blockDim=v.block; config.dynamicSmemBytes=v.shared;
+    if(v.cluster_z) {
+        attr.id=cudaLaunchAttributeClusterDimension;
+        attr.val.clusterDim.x=1; attr.val.clusterDim.y=1; attr.val.clusterDim.z=v.cluster_z;
+        config.attrs=&attr; config.numAttrs=1;
+    }
+    return config;
+}
+#endif
+
 static void setup_kernel() {
     const Variant &v = *selected;
     int device, limit, max_threads, blocks;
@@ -52,11 +65,43 @@ static void setup_kernel() {
            v.name,threads,attr.numRegs,attr.sharedSizeBytes,v.shared,attr.localSizeBytes,
            blocks,v.grid.x,v.grid.y,v.grid.z,v.block.x,v.block.y,v.block.z,v.steps,
            100.0*blocks*((threads+31)/32)*32/max_threads);
+#ifdef LBM_Z2_EXPERIMENT
+    int supported=0,active_clusters=0,potential_size=0;
+    CHECK(cudaDeviceGetAttribute(&supported,cudaDevAttrClusterLaunch,device));
+    if(!supported) { fprintf(stderr,"Device does not support cluster launch\n"); exit(1); }
+    if(v.cluster_z && (v.grid.z%v.cluster_z || threads!=256 || v.block.y!=1 || v.block.z!=1)) {
+        fprintf(stderr,"Invalid Z2 launch geometry\n"); exit(1);
+    }
+    cudaLaunchAttribute launch_attr{};
+    auto config=cluster_config(v,launch_attr);
+    // Query singleton clusters for the ordinary reference; the actual launch
+    // still has no cluster attribute. The occupancy API needs explicit sizing.
+    if(!v.cluster_z) {
+        launch_attr.id=cudaLaunchAttributeClusterDimension;
+        launch_attr.val.clusterDim.x=1;
+        launch_attr.val.clusterDim.y=1;
+        launch_attr.val.clusterDim.z=1;
+        config.attrs=&launch_attr; config.numAttrs=1;
+    }
+    CHECK(cudaOccupancyMaxActiveClusters(&active_clusters,v.kernel,&config));
+    CHECK(cudaOccupancyMaxPotentialClusterSize(&potential_size,v.kernel,&config));
+    if(active_clusters<=0) { fprintf(stderr,"No active clusters for this launch\n"); exit(1); }
+    printf("CLUSTER runtime_cluster=%d dim=1x1x%d active_clusters_device=%d potential_cluster_size=%d\n",
+           v.cluster_z!=0,v.cluster_z?v.cluster_z:1,active_clusters,potential_size);
+#endif
 }
 
 static void launch(const Variant &v, float *src, float *dst) {
     void *args[] = {&src,&dst};
+#ifdef LBM_Z2_EXPERIMENT
+    // Same extended launch API for all experiment rows. The unclustered
+    // D-V2 reference has zero attributes; C0/C1/C2 specify runtime Z2.
+    cudaLaunchAttribute attr{};
+    auto config=cluster_config(v,attr);
+    CHECK(cudaLaunchKernelExC(&config,v.kernel,args));
+#else
     CHECK(cudaLaunchKernel(v.kernel,v.grid,v.block,args,v.shared,0));
+#endif
 }
 static void pair(float *src, float *dst) { launch(*selected,src,dst); }
 static void kern(float *src, float *dst) { launch(variants[0],src,dst); }

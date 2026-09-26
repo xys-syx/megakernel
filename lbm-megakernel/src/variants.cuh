@@ -9,11 +9,19 @@
 #include "../kernels/temporal_v1.cuh"
 #include "../kernels/temporal_v2.cuh"
 
+#ifdef LBM_Z2_EXPERIMENT
+#include "../kernels/cluster_sync.cuh"
+#include "../kernels/cluster_dedup.cuh"
+#endif
+
 struct Variant {
     const char *name;
     const void *kernel;
     dim3 grid, block;
     int shared, steps;
+#ifdef LBM_Z2_EXPERIMENT
+    int cluster_z; // 0 = ordinary launch, 2 = runtime Z2 cluster.
+#endif
 };
 #define KERNEL(k) reinterpret_cast<const void *>(k)
 #define TILE(x,y,z) dim3((SIZE_X+x-1)/x,(SIZE_Y+y-1)/y,(SIZE_Z+z-1)/z)
@@ -41,6 +49,12 @@ static const Variant variants[] = {
     CONTROL("T30-S1-256",t30_s1,30,4,4,256),
     TEMPORAL("T30-V2-128",v2,30,4,4,128,480),
     TEMPORAL("T30-V2-256",v2,30,4,4,256,480),
+#ifdef LBM_Z2_EXPERIMENT
+    // C0 reuses the exact D-V2 kernel entry: only its runtime launch differs.
+    {"D-C0-Z2-256",KERNEL((temporal::v2<16,8,4>)),TILE(16,8,4),dim3(256),38912,2,2},
+    {"D-C1-Z2-256",KERNEL(temporal::z2_sync),TILE(16,8,4),dim3(256),38912,2,2},
+    {"D-V3-Z2-256",KERNEL(temporal::z2_dedup),TILE(16,8,4),dim3(256),38912,2,2},
+#endif
 };
 #undef TEMPORAL
 #undef CONTROL

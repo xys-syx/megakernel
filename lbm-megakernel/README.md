@@ -4,7 +4,7 @@ A CUDA worklog on a concrete optimization: **keep the state between two dependen
 
 The workload is D3Q19 FP32 Lattice Boltzmann on a fixed **120 × 120 × 150** lid-driven cavity, derived from the [Enzyme-GPU-Tests LBM implementation](https://github.com/wsmoses/Enzyme-GPU-Tests/tree/mlir/LBM). This repository builds and runs independently of that project and Enzyme.
 
-**Best measured: `D-V2-256` at 135.82 µs per physical timestep—2.14× speedup over the original `B0` and 2.07× over its matched one-step control, `S2-D256`.** For 1000 timesteps, the measured interval is 135.82 ms rather than B0's 290.13 ms, including GPU launch gaps but excluding setup and output.
+**Original 20-variant campaign: best measured `D-V2-256` at 135.82 µs per physical timestep—2.14× speedup over the original `B0` and 2.07× over its matched one-step control, `S2-D256`.** For 1000 timesteps, the measured interval is 135.82 ms rather than B0's 290.13 ms, including GPU launch gaps but excluding setup and output.
 
 This is **two-step temporal fusion**, not a whole-simulation megakernel. A 1000-step simulation still uses 500 ordered temporal launches. The result demonstrates a useful transformation, not an optimal schedule or a measured performance ceiling.
 
@@ -233,6 +233,63 @@ At 128 workers, T30 V2 reduces time by **2.95%** relative to D V2. At 256 worker
 
 The practical conclusion is to choose **tile shape and worker mapping together**. Minimum halo size, minimum shared storage, and a warp-wide producer row are useful design considerations, but none alone selects the fastest measured implementation.
 
+<!-- Z2_SUMMARY_BEGIN -->
+## 6. Z2 clusters: replace duplicate halo work with DSM stores
+
+This follow-up keeps D-V2’s 16×8×4 tile, 256 workers, FP32 arithmetic and
+38,912 B shared/block. Two neighboring Z blocks form a 16×8×8 cluster tile.
+C2 assigns each first-step producer to one block and streams crossing populations
+through DSMEM. Two cluster barriers protect and order those writes; Phase 2 stays local.
+
+**Fresh matched campaign; 1000-step event medians:**
+
+| Variant | Change | µs/physical step | Time / D-V2 |
+| --- | --- | --- | --- |
+| D-V2-256 | Ordinary D-V2 | 135.681 | 1.000× |
+| D-C0-Z2-256 | C0: cluster launch only | 143.653 | 1.059× |
+| D-C1-Z2-256 | C1: two cluster syncs | 146.022 | 1.076× |
+| D-V3-Z2-256 | C2: deduplication + DSMEM | 140.442 | 1.035× |
+
+C2 removes 16.7% of candidate producer visits and improves on C1 by
+3.82%, but takes **3.51% longer than D-V2**.
+All four variants pass full-allocation bitwise, long-history and sanitizer gates.
+The counts prove DSM communication replaces duplicated work; the timing shows
+why a compiler still needs a profitability model. These are complete-kernel
+controls, not additive phase timings. Cluster C1/C2 names are separate from
+the older one-step C1/C2 variants.
+
+[Implementation and reproduction](docs/Z2_DESIGN.md) · [Full evidence](docs/Z2_RESULTS.md)
+<!-- Z2_SUMMARY_END -->
+
+<!-- CLUSTER_SWEEP_SUMMARY_BEGIN -->
+## 7. Scheduling policy and XZ4: measure cluster cost first
+
+The follow-up first compares explicit Spread and LoadBalancing, then runs
+C0 for Z2, XZ4 and YZ6. Every C0 uses the unchanged D-V2 device function.
+LoadBalancing materially reduces Z2 C0 cost; the required Z2 C1/V3 rerun
+still does not beat ordinary D-V2. XZ4’s C0 cost is close enough to Z2 to
+justify a four-block prototype, so it was implemented with 850 uniquely
+owned producers/block and explicit X/Z/XZ remote-write validation.
+
+**Fresh final campaign; all cluster rows below use LoadBalancing:**
+
+| Variant | µs/physical step | Time / ordinary D-V2 |
+| --- | --- | --- |
+| D-V2-256 | 136.569 | 1.000× |
+| D-V3-Z2-LoadBalancing | 139.632 | 1.022× |
+| D-C0-XZ4-LoadBalancing | 138.393 | 1.013× |
+| D-C1-XZ4-LoadBalancing | 145.282 | 1.064× |
+| D-V3-XZ4-LoadBalancing | 153.386 | 1.123× |
+
+The best cluster still takes 2.24% longer than ordinary D-V2.
+XZ4 saves more producer work, but its DSM interface bytes grow about 2.6×
+versus Z2 for only 25% more logical remote payload. All correctness gates
+pass. Following the guide’s stop condition, Tt=2 cluster tuning stops here;
+pointer hoisting was not added. Deeper temporal blocking is a future experiment.
+
+[Full staged results](docs/CLUSTER_SWEEP_RESULTS.md) · [Kernels and reproduction](docs/CLUSTER_SWEEP_DESIGN.md)
+<!-- CLUSTER_SWEEP_SUMMARY_END -->
+
 ## Correctness is part of the transformation
 
 The numerical expressions and their order are preserved under the recorded compiler settings. A source gate checks the [temporal collision body](kernels/collision.cuh) against B0. Full-allocation comparisons include populations, flag bytes, unused flag-slot bytes, padding, and margins. No error tolerance is used.
@@ -296,7 +353,7 @@ Identify two dependent collision–streaming updates
 
 The hand-written kernels provide executable references and matched controls. The [MLIR GPU dialect](https://mlir.llvm.org/docs/Dialects/GPU/) supplies launches, workgroup memory, and barriers; establishing legality and selecting a profitable realization are the compiler work. See the [pass roadmap](docs/MLIR_FUSION.md).
 
-A whole-simulation megakernel requires an additional dependency and synchronization strategy. Longer temporal tiles, rolling storage, clusters/DSMEM, input staging, and submission controls remain separate experiments. Reduced precision changes the numerical contract. None is implemented or credited with the reported speedup.
+A whole-simulation megakernel requires an additional dependency and synchronization strategy. The Z2 cluster/DSMEM experiment above tests replacing duplicated halo work with communication. Longer temporal tiles, rolling storage, input staging, and submission controls remain separate experiments. Reduced precision changes the numerical contract. None of those follow-ups is credited with the original two-step speedup.
 
 **The central result is that localizing an intermediate between dependent timesteps can matter much more than changing a one-step launch geometry.** The remaining choices are how much producer work to duplicate, what to retain on chip, and how to map that work efficiently—not simply how many kernels to launch.
 
