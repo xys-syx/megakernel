@@ -29,6 +29,12 @@ report:
 clean:
 	rm -rf build
 
+# One kernel for the whole time loop (kernels/onekernel.cuh), B0's launch shape and mapping kept.
+.PHONY: onekernel
+onekernel: build/lbm-onekernel
+build/lbm-onekernel: $(SOURCES) Makefile build/config.txt | build
+	$(CUDA_CXX) $(FLAGS) src/onekernel_main.cu -o $@ $(LIBS)
+
 # Isolated Z2/DSMEM experiment: preserves the original executable and results.
 .PHONY: cluster cluster-check cluster-bench cluster-profile cluster-report cluster-all
 cluster: build/lbm-z2 build/z2-ownership build/z2-model
